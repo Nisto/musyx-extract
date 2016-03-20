@@ -1,5 +1,5 @@
 #
-# MusyX sample extractiol tool   by Nisto
+# MusyX sample extraction tool   by Nisto
 # Last revision: 2015, July 14
 #
 # Developed under Python 3 and may or may not work with other Python versions
