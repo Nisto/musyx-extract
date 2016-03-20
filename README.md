@@ -5,7 +5,8 @@ Sample extractor for GameCube MusyX files
 Python 3.
 
 ## Usage
-To be done...
+Supply one or more directories containing .sdi(r) files and their respective .sam(p) files to the script.
 
+<br>
 
 More docs goes here...
