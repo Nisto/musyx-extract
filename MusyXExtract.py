@@ -323,7 +323,7 @@ def pack_samples(sound_dir, out_dir):
                 loop_start = nibbles_to_samples(cur_meta["loop_start"])
                 loop_end = nibbles_to_samples(cur_meta["loop_end"])
                 loop_length = loop_end - loop_start
-                decoder_offset = total_header_size + (32 * i)
+                decoder_offset = total_header_size + (40 * i) # Size of decoder == 40 bytes (0x28)
 
                 # Write Header
                 sdir_header  = struct.pack(">H", i)                     # Sample ID
@@ -341,11 +341,11 @@ def pack_samples(sound_dir, out_dir):
                 sdir.write(sdir_header)
 
                 # Write decoder values
-                decoder  = struct.pack("2x")                            # Unknown
+                decoder  = struct.pack(">H", 0x0008)                    # Unknown (always 0x0008?)
                 decoder += struct.pack("B", cur_meta["ps"][1])          # Predictor/scale
                 decoder += struct.pack("B", cur_meta["lps"][1])         # Loop predictor/scale"
-                decoder += struct.pack("s", cur_meta["lyn2"])           # Loop sample history n-2
-                decoder += struct.pack("s", cur_meta["lyn1"])           # Loop sample history n-1
+                decoder += cur_meta["lyn2"]                             # Loop sample history n-2
+                decoder += cur_meta["lyn1"]                             # Loop sample history n-1
                 decoder += cur_meta["coeffs"]                           # Coefficients
                 cur_position = sdir.tell()
                 sdir.seek(decoder_offset, os.SEEK_SET)
