@@ -107,14 +107,14 @@ def read_dsp_header(dsp, meta):
     meta["loop_start"]            = read_u32_be(dsp)  # Loop start (in nibbles)
     meta["loop_end"]              = read_u32_be(dsp)  # Loop end (in nibbles)
     dsp.seek(4, os.SEEK_CUR)                          # Initial offset value (in nibbles, always 2?)
-    meta["coeffs"] = dsp.read(32)                     # Coefficienta
+    meta["coeffs"]                = dsp.read(32)      # Coefficienta
     dsp.seek(2, os.SEEK_CUR)                          # Gain (always 0 for ADPCM)
-    meta["ps"] = dsp.read(2)                          # Predictor/scale
+    meta["ps"]                    = dsp.read(2)       # Predictor/scale
     dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
     dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
-    meta["lps"] = dsp.read(2)                         # Predictor/scale for loop context
-    meta["lyn1"] = dsp.read(2)                        # Sample history (n-1) for loop context
-    meta["lyn2"] = dsp.read(2)                        # Sample history (n-2) for loop context
+    meta["lps"]                   = dsp.read(2)       # Predictor/scale for loop context
+    meta["lyn1"]                  = dsp.read(2)       # Sample history (n-1) for loop context
+    meta["lyn2"]                  = dsp.read(2)       # Sample history (n-2) for loop context
     dsp.seek(22)                                      # Padding/reserved
 
 def read_u32_be(f):
@@ -307,6 +307,11 @@ def pack_samples(sound_dir, out_dir):
                     # Copy over sample data
                     sample_size = samples_to_bytes(meta[i]["samples"])
                     extract_data(dsp, samp, sample_size)
+                    cur_position = samp.tell()
+                    if cur_position % 32 != 0:
+                        remainder = 32 - (cur_position % 32)
+                        formatString = "%dx" % remainder;
+                        samp.write(struct.pack(formatString))
 
                 print("Done reading : %s" % filename)
                 i += 1
@@ -339,13 +344,12 @@ def pack_samples(sound_dir, out_dir):
                 decoder  = struct.pack("2x")                            # Unknown
                 decoder += struct.pack("B", cur_meta["ps"][1])          # Predictor/scale
                 decoder += struct.pack("B", cur_meta["lps"][1])         # Loop predictor/scale"
-                decoder += struct.pack("s", cur_meta["lyn2"])          # Loop sample history n-2
-                decoder += struct.pack("s", cur_meta["lyn1"])          # Loop sample history n-1
-
+                decoder += struct.pack("s", cur_meta["lyn2"])           # Loop sample history n-2
+                decoder += struct.pack("s", cur_meta["lyn1"])           # Loop sample history n-1
+                decoder += cur_meta["coeffs"]                           # Coefficients
                 cur_position = sdir.tell()
                 sdir.seek(decoder_offset, os.SEEK_SET)
                 sdir.write(decoder)
-                sdir.write(cur_meta["coeffs"])
                 sdir.seek(cur_position, os.SEEK_SET)
 
             end_of_header = struct.pack(">I", 0xFFFFFFFF)
