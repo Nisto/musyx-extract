@@ -231,12 +231,49 @@ def extract_samples(sound_dir, out_dir):
 
     print()
 
+
+def pack_samples(sound_dir, out_dir):
+    print("Directory: %s" % sound_dir)
+
+    for filename in os.listdir(sound_dir):
+
+        filepath = os.path.join(sound_dir, filename)
+
+        if os.path.isfile(filepath) is not True:
+            continue
+
+        basename = os.path.basename(filename)
+
+        name, ext = os.path.splitext(basename)
+
+        ext = ext.lower()
+
+        if ext != ".dsp" and ext != ".DSP":
+            continue
+
+        print("Done")
+
+    print()
+
+
 def main(argc=len(sys.argv), argv=sys.argv):
     if argc < 2:
         print("Usage: %s <sound_dir> [<sound_dir> ...]" % argv[0])
         return 1
 
+    EXTRACT = 0
+    PACK    = 1
+    mode = EXTRACT
+
     for i in xrange(1, argc):
+
+        # Set mode
+        if argv[i] == "-e" or argv[i] == "-E":
+            mode = EXTRACT
+            continue
+        elif argv[i] == "-p" or argv[i] == "-P":
+            mode = PACK
+            continue
 
         sound_dir = os.path.realpath(argv[i])
 
@@ -244,16 +281,22 @@ def main(argc=len(sys.argv), argv=sys.argv):
             print("ERROR: Invalid directory path (arg %d)" % i)
             continue
 
-        out_dir = os.path.join(sound_dir, "samples")
+        if mode == EXTRACT:
+            out_dir = os.path.join(sound_dir, "samples")
 
-        if os.path.isdir(out_dir) is not True:
-            os.mkdir(out_dir)
+            if os.path.isdir(out_dir) is not True:
+                os.mkdir(out_dir)
+            extract_samples(sound_dir, out_dir)
+        else:
+            out_dir = os.path.join(sound_dir, "sfxProject")
 
-        extract_samples(sound_dir, out_dir)
+            if os.path.isdir(out_dir) is not True:
+                os.mkdir(out_dir)
+                pack_samples(sound_dir, out_dir)
 
     print("No more files to process.")
 
     return 0
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
