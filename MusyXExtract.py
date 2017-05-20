@@ -235,23 +235,33 @@ def extract_samples(sound_dir, out_dir):
 def pack_samples(sound_dir, out_dir):
     print("Directory: %s" % sound_dir)
 
-    for filename in os.listdir(sound_dir):
+    project_name = os.path.basename(sound_dir)
 
-        filepath = os.path.join(sound_dir, filename)
+    # samp and sdir project file names
+    samp_out_name = os.path.join(out_dir, "%s.samp" % project_name)
+    sdir_out_name = os.path.join(out_dir, "%s.sdir" % project_name)
 
-        if os.path.isfile(filepath) is not True:
-            continue
+    with open(samp_out_name, "wb") as samp:
+        with open(sdir_out_name, "wb") as sdir:
+            for filename in os.listdir(sound_dir):
 
-        basename = os.path.basename(filename)
+                filepath = os.path.join(sound_dir, filename)
 
-        name, ext = os.path.splitext(basename)
+                if os.path.isfile(filepath) is not True:
+                    continue
 
-        ext = ext.lower()
+                basename = os.path.basename(filename)
 
-        if ext != ".dsp" and ext != ".DSP":
-            continue
+                name, ext = os.path.splitext(basename)
 
-        print("Done")
+                ext = ext.lower()
+
+                if ext != ".dsp" and ext != ".DSP":
+                    continue
+
+                print("Done with: %s" % filename)
+
+    print("Done")
 
     print()
 
@@ -292,7 +302,7 @@ def main(argc=len(sys.argv), argv=sys.argv):
 
             if os.path.isdir(out_dir) is not True:
                 os.mkdir(out_dir)
-                pack_samples(sound_dir, out_dir)
+            pack_samples(sound_dir, out_dir)
 
     print("No more files to process.")
 
