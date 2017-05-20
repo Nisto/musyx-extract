@@ -115,7 +115,7 @@ def read_dsp_header(dsp, meta):
     meta["lps"]                   = dsp.read(2)       # Predictor/scale for loop context
     meta["lyn1"]                  = dsp.read(2)       # Sample history (n-1) for loop context
     meta["lyn2"]                  = dsp.read(2)       # Sample history (n-2) for loop context
-    dsp.seek(22)                                      # Padding/reserved
+    dsp.seek(22, os.SEEK_CUR)                         # Padding/reserved
 
 def read_u32_be(f):
     data = f.read(4)
@@ -310,7 +310,7 @@ def pack_samples(sound_dir, out_dir):
                     cur_position = samp.tell()
                     if cur_position % 32 != 0:
                         remainder = 32 - (cur_position % 32)
-                        formatString = "%dx" % remainder;
+                        formatString = "%dx" % remainder
                         samp.write(struct.pack(formatString))
 
                 print("Done reading : %s" % filename)
@@ -323,6 +323,8 @@ def pack_samples(sound_dir, out_dir):
                 loop_start = nibbles_to_samples(cur_meta["loop_start"])
                 loop_end = nibbles_to_samples(cur_meta["loop_end"])
                 loop_length = loop_end - loop_start
+                if loop_length != 0:
+                    loop_length += 1
                 decoder_offset = total_header_size + (40 * i) # Size of decoder == 40 bytes (0x28)
 
                 # Write Header
