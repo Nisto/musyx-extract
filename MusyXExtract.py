@@ -32,6 +32,7 @@
 import os
 import sys
 import struct
+import re
 
 if sys.version_info[0] > 2:
     xrange = range
@@ -59,7 +60,10 @@ def nibbles_to_samples(nibbles):
 
 def samples_to_bytes(samples):
     nibbles = samples_to_nibbles(samples)
-    return (nibbles // 2) + (nibbles % 2)
+    raw_bytes = (nibbles // 2) + (nibbles % 2)
+    if raw_bytes % 8 != 0:
+        raw_bytes += 8 - (raw_bytes % 8)
+    return raw_bytes
 
 
 def dsp_header(meta):
@@ -99,8 +103,8 @@ def dsp_header(meta):
 
 
 def read_dsp_header(dsp, meta):
-    meta["samples"] = read_u32_be(dsp)                # Number of raw samples
-    dsp.seek(4, os.SEEK_CUR)                          # Number of nibbles
+    meta["samples"]               = read_u32_be(dsp)  # Number of raw samples
+    meta["nibbles"]               = read_u32_be(dsp)  # Number of nibbles
     meta["rate"]                  = read_u32_be(dsp)  # Sample rate
     meta["loop_flag"]             = read_u16_be(dsp)  # Loop flag
     dsp.seek(2, os.SEEK_CUR)                          # Format (always ADPCM)
@@ -205,7 +209,7 @@ def extract_samples(sound_dir, out_dir):
         with open(group["sdir"], "rb") as sdir:
 
             temp = read_u32_be(sdir)
-            i = 0;
+            i = 0
 
             # for i in xrange(num_samples):
             while temp != 0xFFFFFFFF:
@@ -259,9 +263,7 @@ def extract_samples(sound_dir, out_dir):
                 sample_size = samples_to_bytes(meta[i]["samples"])
 
                 with open(dsp_path, "wb") as dsp:
-
                     dsp.write( dsp_header(meta[i]) )
-
                     extract_data(samp, dsp, sample_size)
 
         print("Done")
@@ -280,6 +282,9 @@ def pack_samples(sound_dir, out_dir):
 
     with open(samp_out_name, "wb") as samp:
         with open(sdir_out_name, "wb") as sdir:
+
+            dsp_id_regex = re.compile('[\dA-F]{5} \((0x[\dA-F]{4})\).dsp')
+
             meta = {}
             i = 0
             # Read in dsp data and copy over samples
@@ -299,19 +304,26 @@ def pack_samples(sound_dir, out_dir):
                 if ext != ".dsp" and ext != ".DSP":
                     continue
 
+                regex_match = dsp_id_regex.match(basename)
+                if regex_match is None:
+                    print("No Match for: %s" % basename)
+                    continue
+
                 meta[i] = {}
+                meta[i]["id"] = int(regex_match.group(1), 16)
                 with open(filepath, "rb") as dsp:
                     read_dsp_header(dsp, meta[i])
                     meta[i]["offset"] = samp.tell()
 
-                    # Copy over sample data
-                    sample_size = samples_to_bytes(meta[i]["samples"])
-                    extract_data(dsp, samp, sample_size)
                     cur_position = samp.tell()
                     if cur_position % 32 != 0:
                         remainder = 32 - (cur_position % 32)
                         formatString = "%dx" % remainder
                         samp.write(struct.pack(formatString))
+
+                    # Copy over sample data
+                    sample_size = samples_to_bytes(meta[i]["samples"])
+                    extract_data(dsp, samp, sample_size)
 
                 print("Done reading : %s" % filename)
                 i += 1
@@ -328,7 +340,7 @@ def pack_samples(sound_dir, out_dir):
                 decoder_offset = total_header_size + (40 * i) # Size of decoder == 40 bytes (0x28)
 
                 # Write Header
-                sdir_header  = struct.pack(">H", i)                     # Sample ID
+                sdir_header  = struct.pack(">H", cur_meta["id"])        # Sample ID
                 sdir_header += struct.pack("2x")                        # Reserved
                 sdir_header += struct.pack(">I", cur_meta["offset"])    # Sample offset in samp
                 sdir_header += struct.pack("4x")                        # Reserved?
