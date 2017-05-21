@@ -1,12 +1,16 @@
 #
 # MusyX sample extraction tool   by Nisto
-# Last revision: 2015, July 14
+# Last revision: 2017, May 20
 #
 # Developed under Python 3 and may or may not work with other Python versions
 #
 
 # Changelog
 
+# 2017, May 20
+# - Fixed samples_to_bytes by rounding up to the next 8 byte alignment (Checked against Super Monkey Ball 2 audio files)
+# - Added support for packing dsp files back into .sdir and .samp files (Checked against Super Monkey Ball 2 audio files)
+#
 # 2015, July 14
 # - Use 0xFFFFFFFF block terminator to determine end of the first sdir meta table instead of determining amount of entries by filesize (Beyblade S.T.B. support)
 # - Get offset for second sdir meta table from the first table and seek instead of reading in order (Beyblade S.T.B. support)
@@ -376,7 +380,9 @@ def pack_samples(sound_dir, out_dir):
 
 def main(argc=len(sys.argv), argv=sys.argv):
     if argc < 2:
-        print("Usage: %s <sound_dir> [<sound_dir> ...]" % argv[0])
+        print("Usage: %s [-(E|P)] <sound_dir> [[-(E|P)] <sound_dir> ...]" % argv[0])
+        print("By default '-E' (extract) is set.")
+        print("Changing modes takes effect for every parameter after it or until another mode is reached")
         return 1
 
     EXTRACT = 0
