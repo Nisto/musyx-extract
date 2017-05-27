@@ -1,12 +1,16 @@
 #
 # MusyX sample extraction tool   by Nisto
-# Last revision: 2017, May 20
-#
-# Developed under Python 3 and may or may not work with other Python versions
+# Last revision: 2017, May 25
 #
 
 # Changelog
-
+#
+# 2017, May 27
+# - Minor fixes and enhancements to the code from bobjrsenior's pull request (thanks)
+# - Improved performance (hopefully?) by using pre-compiled structs and less disk I/O
+# - Removed pointless Python 2 backward compatibility stuff (xrange fallback)
+# - Refactored and cleaned up some code
+#
 # 2017, May 20
 # - Fixed samples_to_bytes by rounding up to the next 8 byte alignment (Checked against Super Monkey Ball 2 audio files)
 # - Added support for packing dsp files back into .sdir and .samp files (Checked against Super Monkey Ball 2 audio files)
@@ -33,13 +37,38 @@
 # - Option for omitting loop values in extracted samples?
 # - Option for padding very short samples? (short samples may cause players to crash)
 
+
 import os
 import sys
 import struct
 import re
 
-if sys.version_info[0] > 2:
-    xrange = range
+
+DSP_ID_REGEX = re.compile(r"^\d{5} \((0x[\dA-F]{4})\).dsp$", re.IGNORECASE)
+
+
+u16be_t = struct.Struct(">H")
+u32be_t = struct.Struct(">I")
+
+
+def put_binary(buf, off, data):
+    buf[off:off+len(data)] = data
+
+def put_u16_be(buf, off, data):
+    buf[off:off+2] = u16be_t.pack(data)
+
+def put_u32_be(buf, off, data):
+    buf[off:off+4] = u32be_t.pack(data)
+
+
+def get_binary(buf, off, size):
+    return buf[off:off+size]
+
+def get_u16_be(buf, off):
+    return u16be_t.unpack(buf[off:off+2])[0]
+
+def get_u32_be(buf, off):
+    return u32be_t.unpack(buf[off:off+4])[0]
 
 
 def samples_to_nibbles(samples):
@@ -49,7 +78,6 @@ def samples_to_nibbles(samples):
         return (whole_frames * 16) + remainder + 2
     else:
         return whole_frames * 16
-
 
 def nibbles_to_samples(nibbles):
     whole_frames = nibbles // 16
@@ -61,7 +89,6 @@ def nibbles_to_samples(nibbles):
     else:
         return whole_frames * 14
 
-
 def samples_to_bytes(samples):
     nibbles = samples_to_nibbles(samples)
     raw_bytes = (nibbles // 2) + (nibbles % 2)
@@ -70,12 +97,23 @@ def samples_to_bytes(samples):
     return raw_bytes
 
 
-def dsp_header(meta):
-    if meta["samples"] > 0xDFFFFFFF: # 0xDFFFFFFF samples = 0xFFFFFFFF nibbles
-        return ""
+def read_dsp_header(dsp, meta):
+    header = dsp.read(96)
 
-    nibbles = samples_to_nibbles(meta["samples"])
+    meta["samples"]    = get_u32_be(header, 0x00)      # number of raw samples
+    meta["nibbles"]    = get_u32_be(header, 0x04)      # number of nibbles
+    meta["rate"]       = get_u32_be(header, 0x08)      # sample rate
+    meta["loop_flag"]  = get_u16_be(header, 0x0C)      # loop flag
+    meta["loop_start"] = get_u32_be(header, 0x10)      # loop start (in nibbles)
+    meta["loop_end"]   = get_u32_be(header, 0x14)      # loop end (in nibbles)
+    meta["coeffs"]     = get_binary(header, 0x1C, 32)  # coefficienta
+    meta["ps"]         = get_binary(header, 0x3E, 2)   # predictor/scale
+    meta["lps"]        = get_binary(header, 0x44, 2)   # predictor/scale for loop context
+    meta["lyn1"]       = get_binary(header, 0x46, 2)   # sample history (n-1) for loop context
+    meta["lyn2"]       = get_binary(header, 0x48, 2)   # sample history (n-2) for loop context
 
+
+def write_dsp_header(dsp, meta):
     if meta["loop_length"] > 1 and meta["loop_start"] + meta["loop_length"] <= meta["samples"]:
         loop_flag = 1
         loop_start = samples_to_nibbles(meta["loop_start"])
@@ -85,76 +123,118 @@ def dsp_header(meta):
         loop_start = 2 # As per the DSPADPCM docs: "If not looping, specify 2, which is the top sample."
         loop_end = 0
 
-    header  = struct.pack(">I", meta["samples"]) # 0x00 raw samples
-    header += struct.pack(">I", nibbles)         # 0x04 nibbles
-    header += struct.pack(">I", meta["rate"])    # 0x08 sample rate
-    header += struct.pack(">H", loop_flag)       # 0x0C loop flag
-    header += struct.pack(">H", 0)               # 0x0E format (always zero - ADPCM)
-    header += struct.pack(">I", loop_start)      # 0x10 loop start address (in nibbles)
-    header += struct.pack(">I", loop_end)        # 0x14 loop end address (in nibbles)
-    header += struct.pack(">I", 2)               # 0x18 initial offset value (in nibbles)
-    header += meta["coeffs"]                     # 0x1C coefficients
-    header += struct.pack(">H", 0)               # 0x3C gain (always zero for ADPCM)
-    header += b"\0" + meta["ps"]                 # 0x3E predictor/scale
-    header += struct.pack(">H", 0)               # 0x40 sample history (not specified?)
-    header += struct.pack(">H", 0)               # 0x42 sample history (not specified?)
-    header += b"\0" + meta["lps"]                # 0x44 predictor/scale for loop context
-    header += meta["lyn1"]                       # 0x46 sample history (n-1) for loop context
-    header += meta["lyn2"]                       # 0x48 sample history (n-2) for loop context
-    header += struct.pack("22x")                 # 0x4A pad (reserved)
+    header = bytearray(96)
 
-    return header
+    nibbles = samples_to_nibbles(meta["samples"]) & 0xFFFFFFFF
 
+    put_u32_be(header, 0x00, meta["samples"])   # raw samples
+    put_u32_be(header, 0x04, nibbles)           # nibbles
+    put_u32_be(header, 0x08, meta["rate"])      # sample rate
+    put_u16_be(header, 0x0C, loop_flag)         # loop flag
+    put_u16_be(header, 0x0E, 0)                 # format (always zero - ADPCM)
+    put_u32_be(header, 0x10, loop_start)        # loop start address (in nibbles)
+    put_u32_be(header, 0x14, loop_end)          # loop end address (in nibbles)
+    put_u32_be(header, 0x18, 2)                 # initial offset value (in nibbles)
+    put_binary(header, 0x1C, meta["coeffs"])    # coefficients
+    put_u16_be(header, 0x3C, 0)                 # gain (always zero for ADPCM)
+    put_u16_be(header, 0x3E, meta["ps"][0])     # predictor/scale
+    put_u16_be(header, 0x40, 0)                 # sample history (not specified?)
+    put_u16_be(header, 0x42, 0)                 # sample history (not specified?)
+    put_u16_be(header, 0x44, meta["lps"][0])    # predictor/scale for loop context
+    put_binary(header, 0x46, meta["lyn1"])      # sample history (n-1) for loop context
+    put_binary(header, 0x48, meta["lyn2"])      # sample history (n-2) for loop context
 
-def read_dsp_header(dsp, meta):
-    meta["samples"]               = read_u32_be(dsp)  # Number of raw samples
-    meta["nibbles"]               = read_u32_be(dsp)  # Number of nibbles
-    meta["rate"]                  = read_u32_be(dsp)  # Sample rate
-    meta["loop_flag"]             = read_u16_be(dsp)  # Loop flag
-    dsp.seek(2, os.SEEK_CUR)                          # Format (always ADPCM)
-    meta["loop_start"]            = read_u32_be(dsp)  # Loop start (in nibbles)
-    meta["loop_end"]              = read_u32_be(dsp)  # Loop end (in nibbles)
-    dsp.seek(4, os.SEEK_CUR)                          # Initial offset value (in nibbles, always 2?)
-    meta["coeffs"]                = dsp.read(32)      # Coefficienta
-    dsp.seek(2, os.SEEK_CUR)                          # Gain (always 0 for ADPCM)
-    meta["ps"]                    = dsp.read(2)       # Predictor/scale
-    dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
-    dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
-    meta["lps"]                   = dsp.read(2)       # Predictor/scale for loop context
-    meta["lyn1"]                  = dsp.read(2)       # Sample history (n-1) for loop context
-    meta["lyn2"]                  = dsp.read(2)       # Sample history (n-2) for loop context
-    dsp.seek(22, os.SEEK_CUR)                         # Padding/reserved
-
-def read_u32_be(f):
-    data = f.read(4)
-    return struct.unpack(">I", data)[0]
+    dsp.write(header)
 
 
-def read_u16_be(f):
-    data = f.read(2)
-    return struct.unpack(">H", data)[0]
+def read_sdir(sdir, meta):
+    # references:
+    # http://www.metroid2002.com/retromodding/wiki/AGSC_(File_Format)
+    # https://github.com/AxioDL/amuse
+
+    sdirbuf = sdir.read()
+
+    i = 0
+
+    tbl1_offset = 0
+
+    while sdirbuf[tbl1_offset:tbl1_offset+4] != b"\xFF\xFF\xFF\xFF":
+
+        meta[i] = {}
+
+        record = get_binary(sdirbuf, tbl1_offset, 0x20)
+        meta[i]["id"]          = get_u16_be(record, 0x00)
+        meta[i]["offset"]      = get_u32_be(record, 0x04)
+        meta[i]["rate"]        = get_u16_be(record, 0x0E)
+        meta[i]["samples"]     = get_u32_be(record, 0x10)
+        meta[i]["loop_start"]  = get_u32_be(record, 0x14)
+        meta[i]["loop_length"] = get_u32_be(record, 0x18)
+
+        tbl1_offset += 0x20
+
+        tbl2_offset = get_u32_be(record, 0x1C)
+
+        record = get_binary(sdirbuf, tbl2_offset, 0x28)
+        meta[i]["ps"]     = record[0x02:0x03]
+        meta[i]["lps"]    = record[0x03:0x04]
+        meta[i]["lyn2"]   = record[0x04:0x06]
+        meta[i]["lyn1"]   = record[0x06:0x08]
+        meta[i]["coeffs"] = record[0x08:0x28]
+
+        i += 1
+
+    del sdirbuf
 
 
-def extract_data(src, dst, size):
-    read_max = 4096
-    left = size
-    while left:
-        if read_max > left:
-            read_max = left
+def write_sdir(sdir, meta):
+    sdirbuf = bytearray(72 * len(meta) + 4)
 
-        data = src.read(read_max)
+    tbl1_offset = 0
+    tbl2_offset = 32 * len(meta) + 4
 
-        if data == b"":
-            break # EOF
+    for i in meta:
+        loop_start = nibbles_to_samples(meta[i]["loop_start"])
+        loop_end = nibbles_to_samples(meta[i]["loop_end"])
+        loop_length = loop_end - loop_start
 
-        dst.write(data)
+        if loop_length != 0:
+            loop_length += 1
 
-        left -= read_max
+        put_u16_be(sdirbuf, tbl1_offset+0x00, meta[i]["id"])
+        put_u32_be(sdirbuf, tbl1_offset+0x04, meta[i]["offset"])
+        put_binary(sdirbuf, tbl1_offset+0x0C, b"\x3C")
+        put_u16_be(sdirbuf, tbl1_offset+0x0E, meta[i]["rate"])
+        put_u32_be(sdirbuf, tbl1_offset+0x10, meta[i]["samples"])
+        put_u32_be(sdirbuf, tbl1_offset+0x14, loop_start)
+        put_u32_be(sdirbuf, tbl1_offset+0x18, loop_length)
+        put_u32_be(sdirbuf, tbl1_offset+0x1C, tbl2_offset)
+
+        put_binary(sdirbuf, tbl2_offset+0x00, b"\x00\x08")
+        put_binary(sdirbuf, tbl2_offset+0x02, meta[i]["ps"][1:2])
+        put_binary(sdirbuf, tbl2_offset+0x03, meta[i]["lps"][1:2])
+        put_binary(sdirbuf, tbl2_offset+0x04, meta[i]["lyn2"])
+        put_binary(sdirbuf, tbl2_offset+0x06, meta[i]["lyn1"])
+        put_binary(sdirbuf, tbl2_offset+0x08, meta[i]["coeffs"])
+
+        tbl1_offset += 0x20
+
+        tbl2_offset += 0x28
+
+    put_binary(sdirbuf, tbl1_offset, b"\xFF\xFF\xFF\xFF")
+
+    sdir.write(sdirbuf)
+
+    del sdirbuf
+
+
+def extract_data(src, dst, todo_size):
+    while todo_size > 0:
+        read_size = min(4096, todo_size)
+        dst.write( src.read(read_size) )
+        todo_size -= read_size
 
 
 def extract_samples(sound_dir, out_dir):
-    print("Directory: %s" % sound_dir)
-
     musyxfiles = {}
 
     for filename in os.listdir(sound_dir):
@@ -198,76 +278,27 @@ def extract_samples(sound_dir, out_dir):
 
         print("Extracting samples from %s... " % samp_name, end="")
 
-        # sdir_size = os.path.getsize(group["sdir"])
-
-        # 4 = block terminator (0xFFFFFFFF)
-        # 72 = table 1 entry size (32) + table 2 entry size (40)
-        # num_samples = (sdir_size - 4) // 72
-
-        # if (sdir_size - 4) % num_samples:
-        #     print("ERROR: Could not determine number of samples")
-        #     continue
-
         meta = {}
 
         with open(group["sdir"], "rb") as sdir:
-
-            temp = read_u32_be(sdir)
-            i = 0
-
-            # for i in xrange(num_samples):
-            while temp != 0xFFFFFFFF:
-
-                meta[i] = {}
-
-                # meta[i]["id"]            = read_u16_be(sdir)         # sample ID
-                # sdir.seek(2, os.SEEK_CUR)                            # reserved?
-                meta[i]["id"]              = (temp & 0xFFFF0000) >> 16 # sample ID
-                meta[i]["offset"]          = read_u32_be(sdir)         # sample's offset in .samp file
-                sdir.seek(6, os.SEEK_CUR)  # reserved? (4) + base note (1) + reserved? (1)
-                meta[i]["rate"]            = read_u16_be(sdir)         # sample rate
-                meta[i]["samples"]         = read_u32_be(sdir)         # amount of raw samples
-                meta[i]["loop_start"]      = read_u32_be(sdir)         # start address of loop (in raw samples)
-                meta[i]["loop_length"]     = read_u32_be(sdir)         # length of loop (in raw samples)
-                # sdir.seek(4, os.SEEK_CUR)                            # offset of decoder values (coefficients, etc.)
-                meta[i]["meta2_offset"]    = read_u32_be(sdir)         # offset of decoder values (coefficients, etc.)
-
-                temp = read_u32_be(sdir)
-                i += 1
-
-            # sdir.seek(4, os.SEEK_CUR) # seek past block terminator (0xFFFFFFFF)
-
-            # for i in xrange(num_samples):
-            for i in meta:
-
-                sdir.seek(meta[i]["meta2_offset"])
-
-                sdir.seek(2, os.SEEK_CUR)         # ?
-                meta[i]["ps"]     = sdir.read(1)  # predictor/scale
-                meta[i]["lps"]    = sdir.read(1)  # loop predictor/scale
-                meta[i]["lyn2"]   = sdir.read(2)  # loop sample history n-2
-                meta[i]["lyn1"]   = sdir.read(2)  # loop sample history n-1
-                meta[i]["coeffs"] = sdir.read(32) # coefficients
-
-        dsp_dir = os.path.join(out_dir, groupname)
-
-        if os.path.isdir(dsp_dir) is not True:
-            os.mkdir(dsp_dir)
+            read_sdir(sdir, meta)
 
         with open(group["samp"], "rb") as samp:
 
-            # for i in xrange(num_samples):
+            dsp_dir = os.path.join(out_dir, groupname)
+
+            if os.path.isdir(dsp_dir) is not True:
+                os.mkdir(dsp_dir)
+
             for i in meta:
 
                 samp.seek(meta[i]["offset"])
 
-                # dsp_path = os.path.join(dsp_dir, "%04d.dsp" % i)
                 dsp_path = os.path.join(dsp_dir, "%05d (0x%04X).dsp" % (i, meta[i]["id"]))
 
-                sample_size = samples_to_bytes(meta[i]["samples"])
-
                 with open(dsp_path, "wb") as dsp:
-                    dsp.write( dsp_header(meta[i]) )
+                    write_dsp_header(dsp, meta[i])
+                    sample_size = samples_to_bytes(meta[i]["samples"])
                     extract_data(samp, dsp, sample_size)
 
         print("Done")
@@ -276,102 +307,58 @@ def extract_samples(sound_dir, out_dir):
 
 
 def pack_samples(sound_dir, out_dir):
-    print("Directory: %s" % sound_dir)
-
     project_name = os.path.basename(sound_dir)
 
-    # samp and sdir project file names
     samp_out_name = os.path.join(out_dir, "%s.samp" % project_name)
     sdir_out_name = os.path.join(out_dir, "%s.sdir" % project_name)
 
+    meta = {}
+    i = 0
+
     with open(samp_out_name, "wb") as samp:
-        with open(sdir_out_name, "wb") as sdir:
 
-            dsp_id_regex = re.compile('[\dA-F]{5} \((0x[\dA-F]{4})\).dsp')
+        for filename in os.listdir(sound_dir):
 
-            meta = {}
-            i = 0
-            # Read in dsp data and copy over samples
-            for filename in os.listdir(sound_dir):
+            filepath = os.path.join(sound_dir, filename)
 
-                filepath = os.path.join(sound_dir, filename)
+            if os.path.isfile(filepath) is not True:
+                continue
 
-                if os.path.isfile(filepath) is not True:
-                    continue
+            basename = os.path.basename(filename)
 
-                basename = os.path.basename(filename)
+            ext = os.path.splitext(basename)[1]
 
-                name, ext = os.path.splitext(basename)
+            if ext.lower() != ".dsp":
+                continue
 
-                ext = ext.lower()
+            regex_match = DSP_ID_REGEX.match(basename)
 
-                if ext != ".dsp" and ext != ".DSP":
-                    continue
+            if regex_match is None:
+                print("No Match for: %s" % basename)
+                continue
 
-                regex_match = dsp_id_regex.match(basename)
-                if regex_match is None:
-                    print("No Match for: %s" % basename)
-                    continue
+            meta[i] = {
+                "id": int(regex_match.group(1), 16),
+                "offset": samp.tell()
+            }
 
-                meta[i] = {}
-                meta[i]["id"] = int(regex_match.group(1), 16)
-                with open(filepath, "rb") as dsp:
-                    read_dsp_header(dsp, meta[i])
-                    meta[i]["offset"] = samp.tell()
+            cur_position = samp.tell()
+            if cur_position % 32 != 0:
+                remainder = 32 - (cur_position % 32)
+                padding = struct.pack("%dx" % remainder)
+                samp.write(padding)
 
-                    cur_position = samp.tell()
-                    if cur_position % 32 != 0:
-                        remainder = 32 - (cur_position % 32)
-                        formatString = "%dx" % remainder
-                        samp.write(struct.pack(formatString))
+            with open(filepath, "rb") as dsp:
+                read_dsp_header(dsp, meta[i])
+                sample_size = samples_to_bytes(meta[i]["samples"])
+                extract_data(dsp, samp, sample_size)
 
-                    # Copy over sample data
-                    sample_size = samples_to_bytes(meta[i]["samples"])
-                    extract_data(dsp, samp, sample_size)
+            print("Done reading : %s" % filename)
 
-                print("Done reading : %s" % filename)
-                i += 1
+            i += 1
 
-            # Write out sdir header information
-            total_header_size = 32 * len(meta) + 4   # Total header sis = num_sfx_items * 32 bytesPerItem + 4 bytesPerEndOfHeaderMarker
-            for i in meta:
-                cur_meta = meta[i]
-                loop_start = nibbles_to_samples(cur_meta["loop_start"])
-                loop_end = nibbles_to_samples(cur_meta["loop_end"])
-                loop_length = loop_end - loop_start
-                if loop_length != 0:
-                    loop_length += 1
-                decoder_offset = total_header_size + (40 * i) # Size of decoder == 40 bytes (0x28)
-
-                # Write Header
-                sdir_header  = struct.pack(">H", cur_meta["id"])        # Sample ID
-                sdir_header += struct.pack("2x")                        # Reserved
-                sdir_header += struct.pack(">I", cur_meta["offset"])    # Sample offset in samp
-                sdir_header += struct.pack("4x")                        # Reserved?
-                sdir_header += struct.pack("B", 0x3C)                   # Base note (always '<'?)
-                sdir_header += struct.pack("1x")                        # Reserved?
-                sdir_header += struct.pack(">H", cur_meta["rate"])      # Sample rate
-                sdir_header += struct.pack(">I", cur_meta["samples"])   # Number of raw samples
-                sdir_header += struct.pack(">I", loop_start)            # Loop start address (in samples)
-                sdir_header += struct.pack(">I", loop_length)           # Loop length (in samples)
-                sdir_header += struct.pack(">I", decoder_offset)        # Offset of decoder values (coefficients, ect)
-
-                sdir.write(sdir_header)
-
-                # Write decoder values
-                decoder  = struct.pack(">H", 0x0008)                    # Unknown (always 0x0008?)
-                decoder += struct.pack("B", cur_meta["ps"][1])          # Predictor/scale
-                decoder += struct.pack("B", cur_meta["lps"][1])         # Loop predictor/scale"
-                decoder += cur_meta["lyn2"]                             # Loop sample history n-2
-                decoder += cur_meta["lyn1"]                             # Loop sample history n-1
-                decoder += cur_meta["coeffs"]                           # Coefficients
-                cur_position = sdir.tell()
-                sdir.seek(decoder_offset, os.SEEK_SET)
-                sdir.write(decoder)
-                sdir.seek(cur_position, os.SEEK_SET)
-
-            end_of_header = struct.pack(">I", 0xFFFFFFFF)
-            sdir.write(end_of_header)
+    with open(sdir_out_name, "wb") as sdir:
+        write_sdir(sdir, meta)
 
     print("Done")
 
@@ -385,38 +372,34 @@ def main(argc=len(sys.argv), argv=sys.argv):
         print("Changing modes takes effect for every parameter after it or until another mode is reached")
         return 1
 
-    EXTRACT = 0
-    PACK    = 1
-    mode = EXTRACT
+    func_todo = extract_samples
+    out_dirname = "samples"
 
-    for i in xrange(1, argc):
+    for arg in argv[1:]:
 
-        # Set mode
-        if argv[i] == "-e" or argv[i] == "-E":
-            mode = EXTRACT
+        if arg == "-e" or arg == "-E":
+            func_todo = extract_samples
+            out_dirname = "samples"
             continue
-        elif argv[i] == "-p" or argv[i] == "-P":
-            mode = PACK
+        elif arg == "-p" or arg == "-P":
+            func_todo = pack_samples
+            out_dirname = "sfxProject"
             continue
 
-        sound_dir = os.path.realpath(argv[i])
+        sound_dir = os.path.realpath(arg)
 
         if os.path.isdir(sound_dir) is not True:
-            print("ERROR: Invalid directory path (arg %d)" % i)
+            print("ERROR: Invalid directory path: %s" % arg)
             continue
 
-        if mode == EXTRACT:
-            out_dir = os.path.join(sound_dir, "samples")
+        out_dir = os.path.join(sound_dir, out_dirname)
 
-            if os.path.isdir(out_dir) is not True:
-                os.mkdir(out_dir)
-            extract_samples(sound_dir, out_dir)
-        else:
-            out_dir = os.path.join(sound_dir, "sfxProject")
+        if os.path.isdir(out_dir) is not True:
+            os.mkdir(out_dir)
 
-            if os.path.isdir(out_dir) is not True:
-                os.mkdir(out_dir)
-            pack_samples(sound_dir, out_dir)
+        print("Directory: %s" % sound_dir)
+
+        func_todo(sound_dir, out_dir)
 
     print("No more files to process.")
 
