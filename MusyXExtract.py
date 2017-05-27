@@ -1,12 +1,16 @@
 #
 # MusyX sample extraction tool   by Nisto
-# Last revision: 2015, July 14
+# Last revision: 2017, May 20
 #
 # Developed under Python 3 and may or may not work with other Python versions
 #
 
 # Changelog
 
+# 2017, May 20
+# - Fixed samples_to_bytes by rounding up to the next 8 byte alignment (Checked against Super Monkey Ball 2 audio files)
+# - Added support for packing dsp files back into .sdir and .samp files (Checked against Super Monkey Ball 2 audio files)
+#
 # 2015, July 14
 # - Use 0xFFFFFFFF block terminator to determine end of the first sdir meta table instead of determining amount of entries by filesize (Beyblade S.T.B. support)
 # - Get offset for second sdir meta table from the first table and seek instead of reading in order (Beyblade S.T.B. support)
@@ -32,9 +36,11 @@
 import os
 import sys
 import struct
+import re
 
 if sys.version_info[0] > 2:
     xrange = range
+
 
 def samples_to_nibbles(samples):
     whole_frames = samples // 14
@@ -44,9 +50,25 @@ def samples_to_nibbles(samples):
     else:
         return whole_frames * 16
 
+
+def nibbles_to_samples(nibbles):
+    whole_frames = nibbles // 16
+    remainder = nibbles % 16
+    remainder -= 2
+
+    if remainder > 0:
+        return (whole_frames * 14) + remainder
+    else:
+        return whole_frames * 14
+
+
 def samples_to_bytes(samples):
     nibbles = samples_to_nibbles(samples)
-    return (nibbles // 2) + (nibbles % 2)
+    raw_bytes = (nibbles // 2) + (nibbles % 2)
+    if raw_bytes % 8 != 0:
+        raw_bytes += 8 - (raw_bytes % 8)
+    return raw_bytes
+
 
 def dsp_header(meta):
     if meta["samples"] > 0xDFFFFFFF: # 0xDFFFFFFF samples = 0xFFFFFFFF nibbles
@@ -83,13 +105,35 @@ def dsp_header(meta):
 
     return header
 
+
+def read_dsp_header(dsp, meta):
+    meta["samples"]               = read_u32_be(dsp)  # Number of raw samples
+    meta["nibbles"]               = read_u32_be(dsp)  # Number of nibbles
+    meta["rate"]                  = read_u32_be(dsp)  # Sample rate
+    meta["loop_flag"]             = read_u16_be(dsp)  # Loop flag
+    dsp.seek(2, os.SEEK_CUR)                          # Format (always ADPCM)
+    meta["loop_start"]            = read_u32_be(dsp)  # Loop start (in nibbles)
+    meta["loop_end"]              = read_u32_be(dsp)  # Loop end (in nibbles)
+    dsp.seek(4, os.SEEK_CUR)                          # Initial offset value (in nibbles, always 2?)
+    meta["coeffs"]                = dsp.read(32)      # Coefficienta
+    dsp.seek(2, os.SEEK_CUR)                          # Gain (always 0 for ADPCM)
+    meta["ps"]                    = dsp.read(2)       # Predictor/scale
+    dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
+    dsp.seek(2, os.SEEK_CUR)                          # Sample history (not specified?)
+    meta["lps"]                   = dsp.read(2)       # Predictor/scale for loop context
+    meta["lyn1"]                  = dsp.read(2)       # Sample history (n-1) for loop context
+    meta["lyn2"]                  = dsp.read(2)       # Sample history (n-2) for loop context
+    dsp.seek(22, os.SEEK_CUR)                         # Padding/reserved
+
 def read_u32_be(f):
     data = f.read(4)
     return struct.unpack(">I", data)[0]
 
+
 def read_u16_be(f):
     data = f.read(2)
     return struct.unpack(">H", data)[0]
+
 
 def extract_data(src, dst, size):
     read_max = 4096
@@ -106,6 +150,7 @@ def extract_data(src, dst, size):
         dst.write(data)
 
         left -= read_max
+
 
 def extract_samples(sound_dir, out_dir):
     print("Directory: %s" % sound_dir)
@@ -168,7 +213,7 @@ def extract_samples(sound_dir, out_dir):
         with open(group["sdir"], "rb") as sdir:
 
             temp = read_u32_be(sdir)
-            i = 0;
+            i = 0
 
             # for i in xrange(num_samples):
             while temp != 0xFFFFFFFF:
@@ -179,7 +224,7 @@ def extract_samples(sound_dir, out_dir):
                 # sdir.seek(2, os.SEEK_CUR)                            # reserved?
                 meta[i]["id"]              = (temp & 0xFFFF0000) >> 16 # sample ID
                 meta[i]["offset"]          = read_u32_be(sdir)         # sample's offset in .samp file
-                sdir.seek(6, os.SEEK_CUR)                              # reserved? (4) + base note (1) + reserved? (1)
+                sdir.seek(6, os.SEEK_CUR)  # reserved? (4) + base note (1) + reserved? (1)
                 meta[i]["rate"]            = read_u16_be(sdir)         # sample rate
                 meta[i]["samples"]         = read_u32_be(sdir)         # amount of raw samples
                 meta[i]["loop_start"]      = read_u32_be(sdir)         # start address of loop (in raw samples)
@@ -222,21 +267,137 @@ def extract_samples(sound_dir, out_dir):
                 sample_size = samples_to_bytes(meta[i]["samples"])
 
                 with open(dsp_path, "wb") as dsp:
-
                     dsp.write( dsp_header(meta[i]) )
-
                     extract_data(samp, dsp, sample_size)
 
         print("Done")
 
     print()
 
+
+def pack_samples(sound_dir, out_dir):
+    print("Directory: %s" % sound_dir)
+
+    project_name = os.path.basename(sound_dir)
+
+    # samp and sdir project file names
+    samp_out_name = os.path.join(out_dir, "%s.samp" % project_name)
+    sdir_out_name = os.path.join(out_dir, "%s.sdir" % project_name)
+
+    with open(samp_out_name, "wb") as samp:
+        with open(sdir_out_name, "wb") as sdir:
+
+            dsp_id_regex = re.compile('[\dA-F]{5} \((0x[\dA-F]{4})\).dsp')
+
+            meta = {}
+            i = 0
+            # Read in dsp data and copy over samples
+            for filename in os.listdir(sound_dir):
+
+                filepath = os.path.join(sound_dir, filename)
+
+                if os.path.isfile(filepath) is not True:
+                    continue
+
+                basename = os.path.basename(filename)
+
+                name, ext = os.path.splitext(basename)
+
+                ext = ext.lower()
+
+                if ext != ".dsp" and ext != ".DSP":
+                    continue
+
+                regex_match = dsp_id_regex.match(basename)
+                if regex_match is None:
+                    print("No Match for: %s" % basename)
+                    continue
+
+                meta[i] = {}
+                meta[i]["id"] = int(regex_match.group(1), 16)
+                with open(filepath, "rb") as dsp:
+                    read_dsp_header(dsp, meta[i])
+                    meta[i]["offset"] = samp.tell()
+
+                    cur_position = samp.tell()
+                    if cur_position % 32 != 0:
+                        remainder = 32 - (cur_position % 32)
+                        formatString = "%dx" % remainder
+                        samp.write(struct.pack(formatString))
+
+                    # Copy over sample data
+                    sample_size = samples_to_bytes(meta[i]["samples"])
+                    extract_data(dsp, samp, sample_size)
+
+                print("Done reading : %s" % filename)
+                i += 1
+
+            # Write out sdir header information
+            total_header_size = 32 * len(meta) + 4   # Total header sis = num_sfx_items * 32 bytesPerItem + 4 bytesPerEndOfHeaderMarker
+            for i in meta:
+                cur_meta = meta[i]
+                loop_start = nibbles_to_samples(cur_meta["loop_start"])
+                loop_end = nibbles_to_samples(cur_meta["loop_end"])
+                loop_length = loop_end - loop_start
+                if loop_length != 0:
+                    loop_length += 1
+                decoder_offset = total_header_size + (40 * i) # Size of decoder == 40 bytes (0x28)
+
+                # Write Header
+                sdir_header  = struct.pack(">H", cur_meta["id"])        # Sample ID
+                sdir_header += struct.pack("2x")                        # Reserved
+                sdir_header += struct.pack(">I", cur_meta["offset"])    # Sample offset in samp
+                sdir_header += struct.pack("4x")                        # Reserved?
+                sdir_header += struct.pack("B", 0x3C)                   # Base note (always '<'?)
+                sdir_header += struct.pack("1x")                        # Reserved?
+                sdir_header += struct.pack(">H", cur_meta["rate"])      # Sample rate
+                sdir_header += struct.pack(">I", cur_meta["samples"])   # Number of raw samples
+                sdir_header += struct.pack(">I", loop_start)            # Loop start address (in samples)
+                sdir_header += struct.pack(">I", loop_length)           # Loop length (in samples)
+                sdir_header += struct.pack(">I", decoder_offset)        # Offset of decoder values (coefficients, ect)
+
+                sdir.write(sdir_header)
+
+                # Write decoder values
+                decoder  = struct.pack(">H", 0x0008)                    # Unknown (always 0x0008?)
+                decoder += struct.pack("B", cur_meta["ps"][1])          # Predictor/scale
+                decoder += struct.pack("B", cur_meta["lps"][1])         # Loop predictor/scale"
+                decoder += cur_meta["lyn2"]                             # Loop sample history n-2
+                decoder += cur_meta["lyn1"]                             # Loop sample history n-1
+                decoder += cur_meta["coeffs"]                           # Coefficients
+                cur_position = sdir.tell()
+                sdir.seek(decoder_offset, os.SEEK_SET)
+                sdir.write(decoder)
+                sdir.seek(cur_position, os.SEEK_SET)
+
+            end_of_header = struct.pack(">I", 0xFFFFFFFF)
+            sdir.write(end_of_header)
+
+    print("Done")
+
+    print()
+
+
 def main(argc=len(sys.argv), argv=sys.argv):
     if argc < 2:
-        print("Usage: %s <sound_dir> [<sound_dir> ...]" % argv[0])
+        print("Usage: %s [-(E|P)] <sound_dir> [[-(E|P)] <sound_dir> ...]" % argv[0])
+        print("By default '-E' (extract) is set.")
+        print("Changing modes takes effect for every parameter after it or until another mode is reached")
         return 1
 
+    EXTRACT = 0
+    PACK    = 1
+    mode = EXTRACT
+
     for i in xrange(1, argc):
+
+        # Set mode
+        if argv[i] == "-e" or argv[i] == "-E":
+            mode = EXTRACT
+            continue
+        elif argv[i] == "-p" or argv[i] == "-P":
+            mode = PACK
+            continue
 
         sound_dir = os.path.realpath(argv[i])
 
@@ -244,16 +405,22 @@ def main(argc=len(sys.argv), argv=sys.argv):
             print("ERROR: Invalid directory path (arg %d)" % i)
             continue
 
-        out_dir = os.path.join(sound_dir, "samples")
+        if mode == EXTRACT:
+            out_dir = os.path.join(sound_dir, "samples")
 
-        if os.path.isdir(out_dir) is not True:
-            os.mkdir(out_dir)
+            if os.path.isdir(out_dir) is not True:
+                os.mkdir(out_dir)
+            extract_samples(sound_dir, out_dir)
+        else:
+            out_dir = os.path.join(sound_dir, "sfxProject")
 
-        extract_samples(sound_dir, out_dir)
+            if os.path.isdir(out_dir) is not True:
+                os.mkdir(out_dir)
+            pack_samples(sound_dir, out_dir)
 
     print("No more files to process.")
 
     return 0
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
